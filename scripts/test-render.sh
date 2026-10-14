@@ -15,6 +15,7 @@ LAST_OUT=""
 
 PUB1="aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789+/AbCdE="
 PUB2="ZyXwVuTsRqPoNmLkJiHgFeDcBa9876543210+/fEdCA="
+PUB3="0BcDeFgHiJkLmNoPqRsTuVwXyZ0123456789+/AbCdI="  # third distinct peer key
 # distinct from PUB1/PUB2: if HPK equalled a peer pubkey, the redaction check
 # "report contains no HPK" would trip on that peer's PublicKey line
 HPK="wBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789+/AbCdQ="
@@ -170,7 +171,8 @@ case3() {
 
 case4() {
     echo "=== CASE 4 ==="
-    "exit_is" "/30 3peers" "render_run 'AWG_PEERS=p1:$PUB1,p2:$PUB2,p3:$PUB1' AWG_POOL=10.10.30.0/30" 2
+    "exit_is" "/30 3peers" "render_run 'AWG_PEERS=p1:$PUB1,p2:$PUB2,p3:$PUB3' AWG_POOL=10.10.30.0/30" 2
+    has "/30 3peers hits capacity, not dup-key" "$LAST_OUT" "capacity 2"
     "exit_is" "/31 1peer" "render_run 'AWG_PEERS=p1:$PUB1' AWG_POOL=10.10.30.0/31" 2
     local out; out="$(render_run AWG_PEERS="p1:$PUB1,p2:$PUB2" AWG_POOL=10.10.30.0/30)" && echo "/30 2peers: PASS" || { echo "FAIL /30 2peers should render" >&2; printf '%s\n' "$out" >&2; fail=1; }
 }
