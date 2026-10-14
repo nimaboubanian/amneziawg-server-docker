@@ -15,7 +15,9 @@ LAST_OUT=""
 
 PUB1="aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789+/AbCdE="
 PUB2="ZyXwVuTsRqPoNmLkJiHgFeDcBa9876543210+/fEdCA="
-HPK="$PUB1"
+# distinct from PUB1/PUB2: if HPK equalled a peer pubkey, the redaction check
+# "report contains no HPK" would trip on that peer's PublicKey line
+HPK="wBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789+/AbCdQ="
 
 FIX_ENV=(AWG_PEERS="phone:$PUB1,laptop:$PUB2")
 FIX_DE=()
@@ -192,9 +194,82 @@ main_cases() { case1; case2; case3; case4; case5; case6; }
 
 # ---------------------------------------------------------------------------
 # boot cases (docker mode only — they need a netns, /dev/net/tun and the daemons)
-# Task 3 adds: case8 keygen+reuse, case9 live up + report redaction, case10 overlap
 # ---------------------------------------------------------------------------
-boot_cases() { :; }
+
+boot_cases() {
+    # leftover volumes from crashed runs (e.g. ^C during a hung case) would
+    # silently reuse a stale key; clean all of them, not just this $$'s
+    docker volume ls -q 2>/dev/null | grep '^awg-keys-test-' \
+        | xargs -r docker volume rm -f >/dev/null 2>&1 || true
+    vol="awg-keys-test-$$"
+    # never leak a volume when a case aborts the run
+    trap 'docker volume rm -f "$vol" >/dev/null 2>&1 || true' EXIT
+    docker volume rm -f "$vol" >/dev/null 2>&1 || true
+
+    # Case 8: first boot generates the server key into the volume; a second
+    # boot reuses it (regenerating would stale every client conf overnight)
+    key_mode() { # -> server.key mode as an octal string, from inside the volume
+        docker run --rm -v "$vol":/etc/amneziawg --entrypoint /bin/sh "$IMG" \
+            -c 'stat -c %a /etc/amneziawg/server.key 2>&1'
+    }
+    pub_of() { # -> derived pubkey, from inside the volume
+        docker run --rm -v "$vol":/etc/amneziawg --entrypoint /bin/sh "$IMG" \
+            -c 'awg pubkey < /etc/amneziawg/server.key' 2>&1
+    }
+    run_is "case8 first-boot keys-only" 0 \
+        image_run -v "$vol":/etc/amneziawg -e BOOT_STAGE=keys-only "$IMG"
+    has "case8 key generated" "$LAST_OUT" "server key generated"
+    eq "case8 key mode 600" "$(key_mode)" "600"
+    pub1="$(pub_of)"
+    matches "case8 pubkey is real" '^[A-Za-z0-9+/]{43}=$' "$pub1"
+    run_is "case8 second boot reuses key" 0 \
+        image_run -v "$vol":/etc/amneziawg -e BOOT_STAGE=keys-only "$IMG"
+    has "case8 reuse logged" "$LAST_OUT" "reusing existing server key"
+    eq "case8 pubkey identical across boots" "$pub1" "$(pub_of)"
+
+    # Case 9: live boot — both userspace daemons up, awg0 configured with the
+    # peers, policy route installed (strongest CI-runnable integration check).
+    # The entrypoint's own logs stay in LAST_OUT: a boot failure names its step.
+    run_is "case9 awg boot" 0 \
+        docker run --rm --cap-add NET_ADMIN --device /dev/net/tun \
+            -v "$vol":/etc/amneziawg -e BOOT_STAGE=up-only \
+            -e AWG_HPK="$HPK" "${FIX_DE[@]}" \
+            --entrypoint /bin/sh "$IMG" -c \
+            '/usr/local/bin/entrypoint.sh 2>&1 &&
+             ip link show awg0 &&
+             awg show awg0 &&
+             pgrep -x sing-box &&
+             pgrep amneziawg-go &&
+             ip rule &&
+             ip route show table 200'
+    has "case9 awg0 up" "$LAST_OUT" "awg0"
+    has "case9 peer phone" "$LAST_OUT" "10.10.30.2"
+    has "case9 peer laptop" "$LAST_OUT" "10.10.30.3"
+    has "case9 policy rule" "$LAST_OUT" "from 10.10.30.0/24 lookup 200"
+    has "case9 default route into tun" "$LAST_OUT" "default dev tun0"
+
+    # Review Focus 5: report.sh output is what users paste into issue
+    # trackers — the server private key AND the shared AWG_HPK must never
+    # appear in it. (No /proc/1/fd/2 log tail: PID1's stderr is dockerd's
+    # never-EOF pipe — tailing it would hang.)
+    report_out="$(docker run --rm -v "$vol":/etc/amneziawg \
+        -e AWG_HPK="$HPK" "${FIX_DE[@]}" \
+        --entrypoint /bin/sh "$IMG" -c 'report.sh' 2>&1)"
+    key_contents="$(docker run --rm -v "$vol":/etc/amneziawg --entrypoint /bin/sh \
+        "$IMG" -c 'cat /etc/amneziawg/server.key')"
+    has "case9 report shows the tunnel" "$report_out" "== AmneziaWG =="
+    lacks "case9 report hides the server private key" "$report_out" "$key_contents"
+    lacks "case9 report hides AWG_HPK" "$report_out" "$HPK"
+
+    # Case 10: a pool overlapping the container's own subnet is fatal (the
+    # decrypted traffic would loop back inside the netns — a silent black hole)
+    run_is "case10 pool overlap fatal" 2 \
+        docker run --rm --cap-add NET_ADMIN -e BOOT_STAGE=up-only \
+            -e AWG_POOL=172.17.0.0/16 "${FIX_DE[@]}" "$IMG"
+    has "case10 overlap message" "$LAST_OUT" "overlaps"
+
+    docker volume rm -f "$vol" >/dev/null 2>&1 || true
+}
 
 [ "$MODE" = local ] && {
     echo "=== LOCAL RENDER TESTS (cases 1-6 only) ==="

@@ -206,11 +206,174 @@ cmd_render() {
     render_singbox_conf
 }
 
-# --- boot (main filled in by Task 3: keygen, daemons, supervision) ---------
+# --- boot -------------------------------------------------------------------
+# Boot order: sing-box first, then routes, then amneziawg-go — decrypted
+# packets are never accepted before the egress path (tun0 -> socks chain)
+# exists. Both daemons are supervised userspace children (AWG is a protocol
+# fork: the host kernel module cannot handle it).
+
+declare -A CHILD_PIDS=()
+AWG_IFACE=awg0
+
+child_dead() { ! kill -0 "${CHILD_PIDS[$1]}" 2>/dev/null; }
+
+wait_for() { # wait_for <seconds> <cmd...>
+    local deadline=$(( SECONDS + $1 ))
+    shift
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        "$@" && return 0
+        sleep 1
+    done
+    return 1
+}
+
+# A pool inside the container's own subnet would make decrypted traffic route
+# back into the same netns instead of the tun — a black hole, silently.
+guard_pool_subnet() {
+    local cidr
+    while read -r cidr; do
+        if cidr_overlap "$cidr" "$AWG_POOL"; then
+            fatal "AWG_POOL $AWG_POOL overlaps the container's own subnet $cidr" \
+                "— pick a pool outside it (container subnets: $(ip -4 -o addr show scope global | awk '{print $4}' | paste -sd, -))"
+        fi
+    done < <(ip -4 -o addr show scope global | awk '{print $4}')
+}
+
+generate_server_key() {
+    local pub
+    if [ -s "$SERVER_KEY" ]; then
+        log "reusing existing server key at $SERVER_KEY"
+        return
+    fi
+    awg genkey >"$SERVER_KEY"
+    chmod 600 "$SERVER_KEY"
+    pub="$(awg pubkey <"$SERVER_KEY")"
+    log "server key generated: $SERVER_KEY (public key: $pub)"
+}
+
+render_configs() {
+    mkdir -p "$AWG_DIR" "$(dirname "$SINGBOX_CONF")"
+    chmod 600 "$SERVER_KEY" 2>/dev/null || true
+    render_awg0_conf >"$AWG0_CONF"
+    chmod 600 "$AWG0_CONF"
+    render_singbox_conf >"$SINGBOX_CONF"
+    sing-box check -c "$SINGBOX_CONF" && log "sing-box config ok"
+}
+
+uapi_ready() {
+    # The daemon's own UAPI socket is the authoritative sign it listens; the
+    # interface is the fallback in case the socket path changes upstream.
+    [ -S "/var/run/amneziawg/$AWG_IFACE.sock" ] || ip link show "$AWG_IFACE" >/dev/null 2>&1
+}
+
+start_singbox() {
+    sing-box run -c "$SINGBOX_CONF" &
+    CHILD_PIDS[sing-box]=$!
+    wait_for 15 ip link show "$TUN_IFACE" \
+        || { log "FATAL: $TUN_IFACE never came up — check /dev/net/tun in compose"; exit 1; }
+    log "sing-box up, $TUN_IFACE ready"
+}
+
+start_awg() {
+    # Foreground daemon (-f): the backgrounding is ours, so supervision owns it.
+    # It creates only an empty $AWG_IFACE; the config arrives via UAPI below.
+    amneziawg-go -f "$AWG_IFACE" &
+    CHILD_PIDS[awg-go]=$!
+    wait_for 15 uapi_ready \
+        || { log "FATAL: $AWG_IFACE never came up (no UAPI socket, no link)"; exit 1; }
+}
+
+# The rendered file carries lines awg setconf rejects (Address, ListenPort has
+# no analogue in UAPI — actually ListenPort IS accepted... safer: strip via
+# awg-quick strip, which exists exactly for this; sed fallback only if the
+# fork dropped the subcommand).
+strip_conf() { # -> stripped config on stdout
+    if awg-quick strip "$AWG0_CONF" 2>/dev/null; then
+        return 0
+    fi
+    sed -e '/^\[Interface\]/,/^$/s/^Address = .*//' "$AWG0_CONF"
+}
+
+# setconf is the obfuscation constants' final judge: a rejected value fails the
+# boot loudly here instead of a tunnel that handshakes but mis-shapes packets.
+apply_awg0_config() {
+    if ! awg setconf "$AWG_IFACE" <(strip_conf); then
+        log "FATAL: awg setconf rejected the rendered config — fix $AWG0_CONF"
+        exit 1
+    fi
+    local addr prefix network server_ip
+    addr="${AWG_POOL%%/*}"
+    prefix="${AWG_POOL##*/}"
+    network="$(ip_to_int "$addr")"
+    server_ip="$(int_to_ip $(( network + 1 )))"
+    ip address add "$server_ip/$prefix" dev "$AWG_IFACE" 2>/dev/null || true
+    ip link set mtu 1420 up dev "$AWG_IFACE"
+    log "$AWG_IFACE configured (setconf ok, $server_ip/$prefix, mtu 1420)"
+}
+
+# Policy routing, not auto_route: only decrypted pool-source traffic enters the
+# tun. amneziawg-go's own UDP socket and sing-box's SOCKS traffic keep the
+# normal route. Idempotent: the tun device's death takes its route with it, so
+# this runs again after every sing-box restart.
+install_routes() {
+    ip rule del from "$AWG_POOL" lookup "$ROUTER_TABLE" 2>/dev/null || true
+    ip rule add from "$AWG_POOL" lookup "$ROUTER_TABLE"
+    ip route replace default dev "$TUN_IFACE" table "$ROUTER_TABLE"
+    log "ip rule from $AWG_POOL lookup $ROUTER_TABLE + default dev $TUN_IFACE installed"
+}
+
+restart_child() {
+    case "$1" in
+        # a fresh tun needs its route back, or decrypted traffic is dropped;
+        # a fresh awg tun/daemon carries no conf, so everything is re-applied
+        sing-box) start_singbox && install_routes ;;
+        awg-go)   start_awg && apply_awg0_config ;;
+    esac
+}
+
+supervise() {
+    local deaths=0 name
+    trap 'shutdown' TERM INT
+    while true; do
+        wait -n 2>/dev/null || true
+        for name in "${!CHILD_PIDS[@]}"; do
+            child_dead "$name" || continue
+            deaths=$((deaths + 1))
+            log "child '$name' died (deaths since boot: $deaths) — restarting"
+            restart_child "$name" || exit 1
+            # Counted per container lifetime, not per "child looked healthy"
+            # check: a daemon that crashes, restarts, survives past the grace
+            # period and crashes again would reset that counter forever and
+            # flap while the healthcheck stayed green.
+            if [ "$deaths" -ge 3 ]; then
+                log "FATAL: $deaths child deaths since boot — giving up"
+                exit 1
+            fi
+        done
+    done
+}
+
+shutdown() {
+    log "shutting down"
+    local pid
+    for pid in "${CHILD_PIDS[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    exit 0
+}
 
 main() {
-    echo "boot not implemented" >&2
-    exit 1
+    validate_env
+    guard_pool_subnet
+    generate_server_key
+    if [ "${BOOT_STAGE:-}" = keys-only ]; then exit 0; fi
+    render_configs
+    start_singbox
+    install_routes
+    start_awg
+    apply_awg0_config
+    if [ "${BOOT_STAGE:-}" = up-only ]; then exit 0; fi
+    supervise
 }
 
 case "${1:-}" in
