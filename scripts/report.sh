@@ -32,8 +32,11 @@ awg pubkey < /etc/amneziawg/server.key 2>/dev/null | sed 's/^/  copy into client
 
 echo
 echo "== Obfuscation constants (must match on BOTH sides) =="
-echo "  S1 = 25  S2 = 25  S3 = 25  S4 = 25"
-echo "  H1 = 84  H2 = 86  H3 = 88  H4 = 90"
+if [ -f /etc/amneziawg/awg0.conf ]; then
+    grep -E '^(S[1-4]|H[1-4]) = ' /etc/amneziawg/awg0.conf | sed 's/^/  /'
+else
+    echo "  (awg0.conf not rendered yet)"
+fi
 echo "  HeaderProtectionKey: read from the server env only —"
 echo "  docker exec vpndogs-awg-inbound sh -c 'printenv AWG_HPK'"
 

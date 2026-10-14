@@ -15,5 +15,4 @@ if ! docker buildx inspect "$BUILDER" >/dev/null 2>&1; then
 fi
 
 export BUILDX_BUILDER="$BUILDER"
-docker buildx build --load -t "$IMAGE" "$@".
-echo done
+docker buildx build --load -t "$IMAGE" "$@" .

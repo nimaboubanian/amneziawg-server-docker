@@ -24,34 +24,23 @@ FIX_ENV=(AWG_PEERS="phone:$PUB1,laptop:$PUB2")
 FIX_DE=()
 for kv in "${FIX_ENV[@]}"; do FIX_DE+=(-e "$kv"); done
 
-render_run() {
-    local host_env=("${FIX_ENV[@]}") docker_env=() kv
-    for kv in "$@"; do
-        host_env+=("$kv")
-        docker_env+=(-e "$kv")
-    done
-    if [ "$MODE" = local ]; then
-        env "${host_env[@]}" bash "$ENTRY" render 2>&1
-    else
-        docker run --rm --network none "${FIX_DE[@]}" "${docker_env[@]}" \
-            --entrypoint /usr/local/bin/entrypoint.sh "$IMG" render 2>&1
-    fi
-}
-
-render() { render_run "$@" || true; }
-
-subcmd() {
-    local host_env=() docker_env=() kv
+# run_env KEY=VAL... cmd args... — run the entrypoint subcommand with env
+# (FIX_ENV + KEY=VAL args), local or in a --network none container per MODE
+run_env() {
+    local host_env=("${FIX_ENV[@]}") docker_env=("${FIX_DE[@]}") kv args=()
     for kv in "$@"; do
         if [[ "$kv" == *=* ]]; then
             host_env+=("$kv")
             docker_env+=(-e "$kv")
+        else
+            args+=("$kv")
         fi
     done
     if [ "$MODE" = local ]; then
-        env "${host_env[@]}" bash "$ENTRY" "$@"
+        env "${host_env[@]}" bash "$ENTRY" "${args[@]}" 2>&1
     else
-        docker run --rm --network none "${docker_env[@]}" --entrypoint /usr/local/bin/entrypoint.sh "$IMG" "$@"
+        docker run --rm --network none "${docker_env[@]}" \
+            --entrypoint /usr/local/bin/entrypoint.sh "$IMG" "${args[@]}" 2>&1
     fi
 }
 
@@ -73,32 +62,8 @@ assert() { # name jq-filter json
 eq() { local name="$1" got="$2" want="$3"; [ "$got" = "$want" ] && echo "$name: PASS" || { echo "$name: FAIL"; printf 'want:\n%s\n\ngot:\n%s\n' "$want" "$got" >&2; fail=1; }; }
 has() { local name="$1" text="$2" pat="$3"; printf '%s\n' "$text" | grep -qF "$pat" && echo "$name: PASS" || { echo "$name: FAIL"; printf 'expected %q in:\n%s\n' "$pat" "$text" >&2; fail=1; }; }
 lacks() { local name="$1" text="$2" pat="$3"; printf '%s\n' "$text" | grep -qF "$pat" && { echo "$name: FAIL"; printf 'found %q in:\n%s\n' "$pat" "$text" >&2; fail=1; } || echo "$name: PASS"; }
-matches() {
-    local name="$1" regex="$2" got="$3"
-    if [[ "$got" =~ $regex ]]; then
-        echo "$name: PASS"
-    else
-        echo "$name: FAIL"
-        printf '  %q does not match %s\n' "$3" "$2" >&2
-        fail=1
-    fi
-}
 
-exit_is() { # name cmd exit-code
-    local name="$1" cmd="$2" want="$3" rc=0
-    set +e; eval "$cmd" >/tmp/out.$$ 2>&1; rc=$?
-    LAST_OUT="$(cat /tmp/out.$$)"; rm -f /tmp/out.$$ || true
-    if [ "$rc" = "$want" ]; then
-        echo "$name: PASS (exit $rc)"
-    else
-        echo "$name: FAIL (exit $rc, want $want)"
-        printf '%s\n' "$LAST_OUT" >&2
-        fail=1
-    fi
-}
-
-# run_is name want cmd... — like exit_is but takes the command as real argv
-# (no eval), for the boot cases whose docker invocations quote badly in eval.
+# run_is name want cmd... — run the command as real argv, compare exit code
 run_is() {
     local name="$1" want="$2" rc=0
     shift 2
@@ -117,7 +82,7 @@ run_is() {
 
 case1() {
     local out="" awg="" sb=""
-    out="$(render)" || { echo "case1 render: FAIL (rc $?)" >&2; fail=1; return; }
+    out="$(run_env render)" || { echo "case1 render: FAIL (rc $?)" >&2; fail=1; return; }
     awg="$(block "awg0.conf" "$out")"
     sb="$(block "sing-box.json" "$out")"
     echo "=== CASE 1 ==="
@@ -144,7 +109,7 @@ case1() {
 
 case2() {
     local out="" awg="" sb=""
-    out="$(render AWG_POOL=10.99.0.0/22 CHAIN_SOCKS_HOST=router2 CHAIN_SOCKS_PORT=2080 AWG_HPK="$HPK")" || { echo "case2 render: FAIL (rc $?)" >&2; fail=1; return; }
+    out="$(run_env render AWG_POOL=10.99.0.0/22 CHAIN_SOCKS_HOST=router2 CHAIN_SOCKS_PORT=2080 AWG_HPK="$HPK")" || { echo "case2 render: FAIL (rc $?)" >&2; fail=1; return; }
     awg="$(block "awg0.conf" "$out")"
     sb="$(block "sing-box.json" "$out")"
     echo "=== CASE 2 ==="
@@ -158,38 +123,38 @@ case2() {
 
 case3() {
     echo "=== CASE 3 ==="
-    "exit_is" "no colon" "render_run AWG_PEERS=phone" 2
+    run_is "no colon" 2 run_env AWG_PEERS=phone
     has "no-colon message names entry" "$LAST_OUT" "phone"
-    "exit_is" "empty name" "render_run AWG_PEERS=:PUB1" 2
+    run_is "empty name" 2 run_env "AWG_PEERS=:PUB1"
     has "empty-name message names entry" "$LAST_OUT" "got ':PUB1'"
-    "exit_is" "bad charset" "render_run 'AWG_PEERS=ph one:PUB1'" 2
+    run_is "bad charset" 2 run_env "AWG_PEERS=ph one:$PUB1"
     has "charset message names entry" "$LAST_OUT" "ph one"
-    "exit_is" "bad pubkey" "render_run AWG_PEERS=phone:shortkey" 2
-    "exit_is" "dup name" "render_run 'AWG_PEERS=phone:$PUB1,phone:$PUB2'" 2
-    "exit_is" "dup pubkey" "render_run 'AWG_PEERS=phone:$PUB1,laptop:$PUB1'" 2
+    run_is "bad pubkey" 2 run_env AWG_PEERS=phone:shortkey
+    run_is "dup name" 2 run_env "AWG_PEERS=phone:$PUB1,phone:$PUB2"
+    run_is "dup pubkey" 2 run_env "AWG_PEERS=phone:$PUB1,laptop:$PUB1"
 }
 
 case4() {
     echo "=== CASE 4 ==="
-    "exit_is" "/30 3peers" "render_run 'AWG_PEERS=p1:$PUB1,p2:$PUB2,p3:$PUB3' AWG_POOL=10.10.30.0/30" 2
+    run_is "/30 3peers" 2 run_env "AWG_PEERS=p1:$PUB1,p2:$PUB2,p3:$PUB3" AWG_POOL=10.10.30.0/30
     has "/30 3peers hits capacity, not dup-key" "$LAST_OUT" "capacity 2"
-    "exit_is" "/31 1peer" "render_run 'AWG_PEERS=p1:$PUB1' AWG_POOL=10.10.30.0/31" 2
-    local out; out="$(render_run AWG_PEERS="p1:$PUB1,p2:$PUB2" AWG_POOL=10.10.30.0/30)" && echo "/30 2peers: PASS" || { echo "FAIL /30 2peers should render" >&2; printf '%s\n' "$out" >&2; fail=1; }
+    run_is "/31 1peer" 2 run_env "AWG_PEERS=p1:$PUB1" AWG_POOL=10.10.30.0/31
+    local out; out="$(run_env render "AWG_PEERS=p1:$PUB1,p2:$PUB2" AWG_POOL=10.10.30.0/30)" && echo "/30 2peers: PASS" || { echo "FAIL /30 2peers should render" >&2; printf '%s\n' "$out" >&2; fail=1; }
 }
 
 case5() {
     echo "=== CASE 5 ==="
     local out
-    out="$(render_run AWG_PEERS=)" && { echo "FAIL missing AWG_PEERS must exit 2" >&2; fail=1; }
+    out="$(run_env render AWG_PEERS=)" && { echo "FAIL missing AWG_PEERS must exit 2" >&2; fail=1; }
     printf '%s\n' "$out" | grep -q "AWG_PEERS is required" && echo "no AWG_PEERS: PASS" || { echo "FAIL missing AWG_PEERS message wrong" >&2; fail=1; }
-    "exit_is" "bad HPK" "render_run AWG_PEERS=phone:$PUB1 AWG_HPK=shortkey" 2
+    run_is "bad HPK" 2 run_env "AWG_PEERS=phone:$PUB1" AWG_HPK=shortkey
     has "bad HPK message names AWG_HPK" "$LAST_OUT" "AWG_HPK"
 }
 
 case6() {
     echo "=== CASE 6 ==="
-    "exit_is" "overlap" "subcmd selftest-cidr 10.10.30.0/24 10.10.30.5/32" 0
-    "exit_is" "no-overlap" "subcmd selftest-cidr 10.10.30.0/24 192.168.1.0/24" 1
+    run_is "overlap" 0 run_env selftest-cidr 10.10.30.0/24 10.10.30.5/32
+    run_is "no-overlap" 1 run_env selftest-cidr 10.10.30.0/24 192.168.1.0/24
 }
 
 main_cases() { case1; case2; case3; case4; case5; case6; }
@@ -223,7 +188,11 @@ boot_cases() {
     has "case8 key generated" "$LAST_OUT" "server key generated"
     eq "case8 key mode 600" "$(key_mode)" "600"
     pub1="$(pub_of)"
-    matches "case8 pubkey is real" '^[A-Za-z0-9+/]{43}=$' "$pub1"
+    if [[ "$pub1" =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
+        echo "case8 pubkey is real: PASS"
+    else
+        echo "case8 pubkey is real: FAIL"; fail=1
+    fi
     run_is "case8 second boot reuses key" 0 \
         image_run -v "$vol":/etc/amneziawg -e BOOT_STAGE=keys-only "$IMG"
     has "case8 reuse logged" "$LAST_OUT" "reusing existing server key"

@@ -1,5 +1,3 @@
-ARG BASE_IMAGE=docker.arvancloud.ir/library/alpine:3.24
-
 # amneziawg-go: the userspace AWG 3.1 daemon. Built from source — no release
 # binaries published, and the container must not depend on a host kernel
 # module (the mainline wireguard module cannot decrypt AWG anyway).
@@ -25,13 +23,14 @@ RUN git clone --branch "${AWGTOOLS_VERSION}" --depth 1 \
         https://github.com/amnezia-vpn/amneziawg-tools /tools
 RUN make -C /tools/src
 
-FROM ${BASE_IMAGE}
+# sing-box: release binary. curl and the CA bundle live in this build stage
+# only — the runtime image makes no network requests of its own.
+FROM docker.arvancloud.ir/library/alpine:3.24 AS singbox-build
 
 ARG SINGBOX_VERSION=1.14.2
 ARG TARGETARCH
 
-RUN apk add --no-cache bash jq curl tini ca-certificates iproute2
-
+RUN apk add --no-cache curl ca-certificates
 RUN set -eux; \
     curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/sing_box.tar.gz \
         "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${TARGETARCH}-musl.tar.gz"; \
@@ -39,9 +38,13 @@ RUN set -eux; \
         "sing-box-${SINGBOX_VERSION}-linux-${TARGETARCH}-musl/sing-box"; \
     mv "/tmp/sing-box-${SINGBOX_VERSION}-linux-${TARGETARCH}-musl/sing-box" /usr/local/bin/sing-box; \
     chmod +x /usr/local/bin/sing-box; \
-    rm -rf /tmp/sing_box.tar.gz "/tmp/sing-box-${SINGBOX_VERSION}-linux-${TARGETARCH}-musl"; \
     sing-box version
 
+FROM docker.arvancloud.ir/library/alpine:3.24
+
+RUN apk add --no-cache bash iproute2 tini
+
+COPY --from=singbox-build /usr/local/bin/sing-box /usr/local/bin/sing-box
 COPY --from=awg-go-build /src/amneziawg-go /usr/local/bin/amneziawg-go
 COPY --from=awg-tools-build /tools/src/wg /usr/local/bin/awg
 COPY --from=awg-tools-build /tools/src/wg-quick/linux.bash /usr/local/bin/awg-quick

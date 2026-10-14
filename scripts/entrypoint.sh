@@ -38,21 +38,9 @@ fatal() { echo "FATAL: $*" >&2; exit 2; }
 
 # --- env parsing -----------------------------------------------------------
 
-is_ipv4_addr() {
-    local -a o=()
-    local part
-    IFS=. read -r -a o <<<"$1"
-    [[ "${#o[@]}" -eq 4 ]] || return 1
-    for part in "${o[@]}"; do
-        [[ "$part" =~ ^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$ ]] || return 1
-    done
-}
-
 is_ipv4_cidr() {
-    [[ "$1" == */* ]] || return 1
-    is_ipv4_addr "${1%%/*}" || return 1
-    local mask="${1##*/}"
-    [[ "$mask" =~ ^(0|[0-9]|[12][0-9]|3[0-2])$ ]]
+    local q='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+    [[ "$1" =~ ^$q\.$q\.$q\.$q/(3[0-2]|[12][0-9]|[0-9])$ ]]
 }
 
 # AWG keys are plain x25519: 32 bytes base64-encoded = 43 chars + '=' padding,
@@ -179,23 +167,25 @@ EOF
 render_singbox_conf() {
     # auto_route stays off on purpose: the entrypoint owns routing via a policy
     # rule so only decrypted pool-source traffic enters the tun.
-    jq -n --arg host "$CHAIN_SOCKS_HOST" --argjson port "$CHAIN_SOCKS_PORT" '{
-        log: {level: "warn"},
-        inbounds: [{
-            type: "tun",
-            tag: "tun-in",
-            interface_name: "tun0",
-            address: ["198.18.0.1/30"],
-            mtu: 1380,
-            auto_route: false,
-            strict_route: false
-        }],
-        outbounds: [
-            {type: "direct", tag: "direct-out"},
-            {type: "socks", tag: "chain-out", server: $host, server_port: $port}
-        ],
-        route: {final: "chain-out"}
-    }'
+    cat <<EOF
+{
+  "log": {"level": "warn"},
+  "inbounds": [{
+    "type": "tun",
+    "tag": "tun-in",
+    "interface_name": "tun0",
+    "address": ["198.18.0.1/30"],
+    "mtu": 1380,
+    "auto_route": false,
+    "strict_route": false
+  }],
+  "outbounds": [
+    {"type": "direct", "tag": "direct-out"},
+    {"type": "socks", "tag": "chain-out", "server": "$CHAIN_SOCKS_HOST", "server_port": $CHAIN_SOCKS_PORT}
+  ],
+  "route": {"final": "chain-out"}
+}
+EOF
 }
 
 cmd_render() {
