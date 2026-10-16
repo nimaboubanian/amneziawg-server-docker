@@ -111,9 +111,15 @@ Jmax = 70
 [Peer]
 PublicKey = <server's, from report.sh>
 Endpoint = <host>:1063         # server's public IP or DNS name
-AllowedIPs = 0.0.0.0/0
+AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 ```
+
+`::/0` closes the client-side IPv6 leak: with only `0.0.0.0/0` a dual-stack
+client keeps using its native IPv6 beside the tunnel, and dual-stack services
+see (and block) the client's real IPv6 address instead of the chain exit. All
+IPv6 routed into the tunnel is dropped server-side (peer allowed-ips are
+IPv4-only), and native IPv6 returns when the tunnel goes down.
 
 Verify from the server side: `report.sh` prints `latest handshake` and
 transfer counters for each established peer.
