@@ -5,6 +5,7 @@
 #   entrypoint.sh render                print every rendered config (test path)
 #   entrypoint.sh selftest-cidr A B     exit 0 if CIDR A and CIDR B overlap
 set -euo pipefail
+umask 077
 
 AWG_POOL="${AWG_POOL:-10.10.30.0/24}"
 CHAIN_SOCKS_HOST="${CHAIN_SOCKS_HOST:-vpndogs-router}"
