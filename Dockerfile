@@ -23,28 +23,25 @@ RUN git clone --branch "${AWGTOOLS_VERSION}" --depth 1 \
         https://github.com/amnezia-vpn/amneziawg-tools /tools
 RUN make -C /tools/src
 
-# sing-box: release binary. curl and the CA bundle live in this build stage
-# only — the runtime image makes no network requests of its own.
-FROM docker.arvancloud.ir/library/alpine:3.24 AS singbox-build
+# hev-socks5-tunnel: TUN-to-SOCKS5 bridge, built from source as a static
+# binary so the runtime image needs no extra libraries.
+FROM docker.arvancloud.ir/library/alpine:3.24 AS hev-build
 
-ARG SINGBOX_VERSION=1.14.2
-ARG TARGETARCH
+ARG HEV_VERSION=2.14.4
 
-RUN apk add --no-cache curl ca-certificates
+RUN apk add --no-cache gcc make musl-dev git linux-headers
 RUN set -eux; \
-    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/sing_box.tar.gz \
-        "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${TARGETARCH}-musl.tar.gz"; \
-    tar -xzf /tmp/sing_box.tar.gz -C /tmp \
-        "sing-box-${SINGBOX_VERSION}-linux-${TARGETARCH}-musl/sing-box"; \
-    mv "/tmp/sing-box-${SINGBOX_VERSION}-linux-${TARGETARCH}-musl/sing-box" /usr/local/bin/sing-box; \
-    chmod +x /usr/local/bin/sing-box; \
-    sing-box version
+    git clone --depth 1 --branch "${HEV_VERSION}" --recursive --shallow-submodules \
+        https://github.com/heiher/hev-socks5-tunnel /src-hev; \
+    sed -i 's/^LDFLAGS=/LDFLAGS=-static /' /src-hev/Makefile; \
+    make -C /src-hev -j"$(nproc)"; \
+    install -m 0755 /src-hev/bin/hev-socks5-tunnel /usr/local/bin/hev-socks5-tunnel
 
 FROM docker.arvancloud.ir/library/alpine:3.24
 
 RUN apk add --no-cache bash iproute2 tini
 
-COPY --from=singbox-build /usr/local/bin/sing-box /usr/local/bin/sing-box
+COPY --from=hev-build /usr/local/bin/hev-socks5-tunnel /usr/local/bin/hev-socks5-tunnel
 COPY --from=awg-go-build /src/amneziawg-go /usr/local/bin/amneziawg-go
 COPY --from=awg-tools-build /tools/src/wg /usr/local/bin/awg
 COPY --from=awg-tools-build /tools/src/wg-quick/linux.bash /usr/local/bin/awg-quick

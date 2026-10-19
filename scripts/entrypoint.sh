@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # entrypoint.sh — AmneziaWG inbound server for the vpndogs stack.
 #
-#   entrypoint.sh                       boot: keygen -> configs -> sing-box + awg0
+#   entrypoint.sh                       boot: keygen -> configs -> hev-socks5-tunnel + awg0
 #   entrypoint.sh render                print every rendered config (test path)
 #   entrypoint.sh selftest-cidr A B     exit 0 if CIDR A and CIDR B overlap
 set -euo pipefail
@@ -28,7 +28,7 @@ H4=90
 AWG_DIR="/etc/amneziawg"
 SERVER_KEY="$AWG_DIR/server.key"
 AWG0_CONF="$AWG_DIR/awg0.conf"
-SINGBOX_CONF="/etc/sing-box/config.json"
+HEV_CONF="/etc/hev/config.yml"
 TUN_IFACE="tun0"
 ROUTER_TABLE=200
 
@@ -165,27 +165,24 @@ EOF
     done
 }
 
-render_singbox_conf() {
-    # auto_route stays off on purpose: the entrypoint owns routing via a policy
-    # rule so only decrypted pool-source traffic enters the tun.
+render_hev_conf() {
+    # Plain text: hev-socks5-tunnel has no config-check subcommand, so
+    # test-render.sh asserts the keys instead. It never touches routes; the
+    # entrypoint owns routing via a policy rule so only decrypted pool-source
+    # traffic enters the tun. udp: udp = SOCKS5 UDP ASSOCIATE.
     cat <<EOF
-{
-  "log": {"level": "warn"},
-  "inbounds": [{
-    "type": "tun",
-    "tag": "tun-in",
-    "interface_name": "tun0",
-    "address": ["198.18.0.1/30"],
-    "mtu": 1380,
-    "auto_route": false,
-    "strict_route": false
-  }],
-  "outbounds": [
-    {"type": "direct", "tag": "direct-out"},
-    {"type": "socks", "tag": "chain-out", "server": "$CHAIN_SOCKS_HOST", "server_port": $CHAIN_SOCKS_PORT}
-  ],
-  "route": {"final": "chain-out"}
-}
+tunnel:
+  name: $TUN_IFACE
+  mtu: 1380
+  ipv4: 198.18.0.1
+
+socks5:
+  address: $CHAIN_SOCKS_HOST
+  port: $CHAIN_SOCKS_PORT
+  udp: udp
+
+misc:
+  log-level: warn
 EOF
 }
 
@@ -193,12 +190,12 @@ cmd_render() {
     validate_env
     echo "# === awg0.conf ==="
     render_awg0_conf
-    echo "# === sing-box.json ==="
-    render_singbox_conf
+    echo "# === hev.yml ==="
+    render_hev_conf
 }
 
 # --- boot -------------------------------------------------------------------
-# Boot order: sing-box first, then routes, then amneziawg-go — decrypted
+# Boot order: hev-socks5-tunnel first, then routes, then amneziawg-go — decrypted
 # packets are never accepted before the egress path (tun0 -> socks chain)
 # exists. Both daemons are supervised userspace children (AWG is a protocol
 # fork: the host kernel module cannot handle it).
@@ -243,12 +240,11 @@ generate_server_key() {
 }
 
 render_configs() {
-    mkdir -p "$AWG_DIR" "$(dirname "$SINGBOX_CONF")"
+    mkdir -p "$AWG_DIR" "$(dirname "$HEV_CONF")"
     chmod 600 "$SERVER_KEY" 2>/dev/null || true
     render_awg0_conf >"$AWG0_CONF"
     chmod 600 "$AWG0_CONF"
-    render_singbox_conf >"$SINGBOX_CONF"
-    sing-box check -c "$SINGBOX_CONF" && log "sing-box config ok"
+    render_hev_conf >"$HEV_CONF"
 }
 
 uapi_ready() {
@@ -257,12 +253,12 @@ uapi_ready() {
     [ -S "/var/run/amneziawg/$AWG_IFACE.sock" ] || ip link show "$AWG_IFACE" >/dev/null 2>&1
 }
 
-start_singbox() {
-    sing-box run -c "$SINGBOX_CONF" &
-    CHILD_PIDS[sing-box]=$!
+start_hev() {
+    hev-socks5-tunnel "$HEV_CONF" &
+    CHILD_PIDS[hev]=$!
     wait_for 15 ip link show "$TUN_IFACE" \
         || { log "FATAL: $TUN_IFACE never came up — check /dev/net/tun in compose"; exit 1; }
-    log "sing-box up, $TUN_IFACE ready"
+    log "hev-socks5-tunnel up, $TUN_IFACE ready"
 }
 
 start_awg() {
@@ -303,9 +299,9 @@ apply_awg0_config() {
 }
 
 # Policy routing, not auto_route: only decrypted pool-source traffic enters the
-# tun. amneziawg-go's own UDP socket and sing-box's SOCKS traffic keep the
+# tun. amneziawg-go's own UDP socket and hev-socks5-tunnel's SOCKS traffic keep the
 # normal route. Idempotent: the tun device's death takes its route with it, so
-# this runs again after every sing-box restart.
+# this runs again after every hev-socks5-tunnel restart.
 install_routes() {
     ip rule del from "$AWG_POOL" lookup "$ROUTER_TABLE" 2>/dev/null || true
     ip rule add from "$AWG_POOL" lookup "$ROUTER_TABLE"
@@ -317,7 +313,7 @@ restart_child() {
     case "$1" in
         # a fresh tun needs its route back, or decrypted traffic is dropped;
         # a fresh awg tun/daemon carries no conf, so everything is re-applied
-        sing-box) start_singbox && install_routes ;;
+        hev)      start_hev && install_routes ;;
         awg-go)   start_awg && apply_awg0_config ;;
     esac
 }
@@ -359,7 +355,7 @@ main() {
     generate_server_key
     if [ "${BOOT_STAGE:-}" = keys-only ]; then exit 0; fi
     render_configs
-    start_singbox
+    start_hev
     install_routes
     start_awg
     apply_awg0_config

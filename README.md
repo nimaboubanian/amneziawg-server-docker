@@ -3,7 +3,7 @@
 A userspace AmneziaWG server for the [vpndogs](https://github.com/nimaboubanian)
 stack: clients connect on UDP 1063, their traffic is decrypted by
 `amneziawg-go` (the obfuscated WireGuard fork — survives DPI that
-fingerprints and blocks plain WireGuard) and policy-routed into a sing-box
+fingerprints and blocks plain WireGuard) and policy-routed into a hev-socks5-tunnel
 `tun`, which SOCKS-es out through the stack's router chain
 (`vpndogs-router:1070`) — client traffic exits wherever the chain exits.
 
@@ -22,7 +22,7 @@ client --amneziawg (obfuscated)--> host:1063/udp
                         |  (userspace daemon: amneziawg-go -f awg0)
                         v
                       policy route: from 10.10.30.0/24 lookup 200 -> tun0
-                        |  (sing-box tun inbound)
+                        |  (hev-socks5-tunnel tun)
                         v
                       socks://vpndogs-router:1070  -> (VPN chain exit)
 ```
@@ -30,10 +30,10 @@ client --amneziawg (obfuscated)--> host:1063/udp
 The container runs **two** supervised daemons (AWG is a protocol fork: the
 host kernel module cannot decrypt it, and no host kernel prerequisite is
 needed at all — that is what makes this node more portable than the WG
-sibling). `amneziawg-go -f awg0` decrypts/obfuscates; sing-box provides the
+sibling). `amneziawg-go -f awg0` decrypts/obfuscates; hev-socks5-tunnel provides the
 tun egress. Config arrives via `awg setconf` (UAPI), address/MTU via plain
 `ip` commands: `awg0.conf` (ListenPort 1063, deterministic addressing,
-pinned obfuscation constants), `sing-box` tun + socks chain config.
+pinned obfuscation constants), `hev-socks5-tunnel` tun + socks chain config.
 
 ## Server-side setup
 
@@ -150,7 +150,7 @@ transfer counters for each established peer.
   profile.
 - **Traffic enters but never exits** — check `report.sh`: the policy route
   must show `default dev tun0` in `table 200` and both daemons must be UP
-  (`== Processes ==`). If sing-box's socks server is not reachable,
+  (`== Processes ==`). If hev-socks5-tunnel's socks server is not reachable,
   `route.final` traffic is dropped.
 - **Host UDP 1063 collision** — docker port publish fails with `Address
   already in use`; stop whatever binds 1063/udp or change only the *host*

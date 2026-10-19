@@ -81,10 +81,10 @@ run_is() {
 # ---------- Cases 1-6 (local-renderable) ----------
 
 case1() {
-    local out="" awg="" sb=""
+    local out="" awg="" hv=""
     out="$(run_env render)" || { echo "case1 render: FAIL (rc $?)" >&2; fail=1; return; }
     awg="$(block "awg0.conf" "$out")"
-    sb="$(block "sing-box.json" "$out")"
+    hv="$(block "hev.yml" "$out")"
     echo "=== CASE 1 ==="
     has "awg0 has ListenPort 1063" "$awg" "ListenPort = 1063"
     has "awg0 has Address 10.10.30.1/24" "$awg" "Address = 10.10.30.1/24"
@@ -98,27 +98,26 @@ case1() {
     has "PUB1 present" "$awg" "$PUB1"
     has "PUB2 present" "$awg" "$PUB2"
     lacks "no HeaderProtectionKey line when AWG_HPK unset" "$awg" "HeaderProtectionKey"
-    assert "sb tun name" '.inbounds[] | select(.type=="tun") | .interface_name == "tun0"' "$sb"
-    assert "sb mtu 1380" '.inbounds[] | select(.type=="tun") | .mtu == 1380' "$sb"
-    assert "sb auto_route false" '.inbounds[] | select(.type=="tun") | .auto_route == false' "$sb"
-    assert "sb route final is socks" '.route.final | contains("chain-out")' "$sb"
-    assert "sb socks has router" '.outbounds[] | select(.tag=="chain-out") | .type=="socks"' "$sb"
-    assert "sb socks server" '.outbounds[] | select(.tag=="chain-out") | .server == "vpndogs-router"' "$sb"
-    assert "sb socks port" '.outbounds[] | select(.tag=="chain-out") | .server_port == 1070' "$sb"
+    has "hev tun name" "$hv" "name: tun0"
+    has "hev mtu 1380" "$hv" "mtu: 1380"
+    has "hev socks server" "$hv" "address: vpndogs-router"
+    has "hev socks port" "$hv" "port: 1070"
+    has "hev udp associate" "$hv" "udp: udp"
+    lacks "hev no udp-in-tcp" "$hv" "udp: tcp"
 }
 
 case2() {
-    local out="" awg="" sb=""
+    local out="" awg="" hv=""
     out="$(run_env render AWG_POOL=10.99.0.0/22 CHAIN_SOCKS_HOST=router2 CHAIN_SOCKS_PORT=2080 AWG_HPK="$HPK")" || { echo "case2 render: FAIL (rc $?)" >&2; fail=1; return; }
     awg="$(block "awg0.conf" "$out")"
-    sb="$(block "sing-box.json" "$out")"
+    hv="$(block "hev.yml" "$out")"
     echo "=== CASE 2 ==="
     has "awg0 Address 10.99.0.1/22" "$awg" "Address = 10.99.0.1/22"
     has "peer1 AllowedIPs" "$awg" "AllowedIPs = 10.99.0.2/32"
     has "peer2 AllowedIPs" "$awg" "AllowedIPs = 10.99.0.3/32"
     has "HeaderProtectionKey present when AWG_HPK set" "$awg" "HeaderProtectionKey = $HPK"
-    assert "sb socks server router2" '.outbounds[] | select(.tag=="chain-out") | .server == "router2"' "$sb"
-    assert "sb socks port 2080" '.outbounds[] | select(.tag=="chain-out") | .server_port == 2080' "$sb"
+    has "hev socks server router2" "$hv" "address: router2"
+    has "hev socks port 2080" "$hv" "port: 2080"
 }
 
 case3() {
@@ -209,7 +208,7 @@ boot_cases() {
             '/usr/local/bin/entrypoint.sh 2>&1 &&
              ip link show awg0 &&
              awg show awg0 &&
-             pgrep -x sing-box &&
+             pgrep -f ^hev-socks5-tunnel &&
              pgrep amneziawg-go &&
              ip rule &&
              ip route show table 200'

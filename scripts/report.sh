@@ -3,8 +3,8 @@
 set -u
 
 echo "== Processes =="
-for p in sing-box amneziawg-go; do
-    pid=$(pgrep -x "$p" 2>/dev/null | head -1)
+for p in hev-socks5-tunnel amneziawg-go; do
+    pid=$(pgrep -f "^$p" 2>/dev/null | head -1)
     if [ -n "$pid" ]; then echo "  $p UP   pid=$pid"; else echo "  $p NOT RUNNING"; fi
 done
 awg show awg0 >/dev/null 2>&1 && echo "  awg0 interface UP" || echo "  awg0 interface DOWN"
